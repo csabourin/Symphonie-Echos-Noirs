@@ -21,6 +21,11 @@ mode = "flatpack"; // ["assembled", "flatpack"]
 // Toggle rendering of the plexiglass mirror itself in 3D preview
 show_mirror = true;
 
+// Exploded view (assembled mode only): separation gap (mm) inserted between each
+// layer along the stack axis, in true assembly order. 0 = fully assembled;
+// try 15-25 to see how the layers stack for glue-up. Has no effect in flatpack.
+explode = 0; // [0:1:60]
+
 /* [Material & Fabrication Parameters] */
 // Wood sheet thickness (mm) - matching the beacons/lantern sheets
 wood_thickness = 2.8; 
@@ -363,21 +368,26 @@ module assembly_3d() {
             translate([0, frame_height / 2, -total_frame_thickness / 2]) {
                 
                 // --- Mirror Stack Assembly (relative to frame center) ---
-                
+                // In exploded view each layer is shifted along +Z by `explode` times
+                // its position in the stacking order, so the glue-up sequence reads
+                // back -> spacers -> mirror -> bezel -> overlay. With explode = 0 the
+                // offsets collapse to the original assembled positions.
+
                 // 1. Back Plate (Z = 0 of the frame stack)
                 color("Sienna")
                     linear_extrude(height = wood_thickness)
                         back_plate_2d(true);
 
-                // Battery cover (3D printed, protrudes from the back plate outward)
+                // Battery cover (3D printed, protrudes from the back plate outward).
+                // Explode pushes it further out the back (away from the stack).
                 if (show_battery_cover) {
-                    translate([0, batt_pocket_y, 0])
+                    translate([0, batt_pocket_y, -explode * 1.5])
                         color("DimGray", 0.9)
                         battery_cover_3d();
                 }
 
                 // 2. Electronics spacer (first spacer, on top of back plate)
-                translate([0, 0, wood_thickness]) {
+                translate([0, 0, wood_thickness + explode * 1]) {
                     color("SlateGray")
                         linear_extrude(height = wood_thickness)
                         electronics_spacer_layer_2d();
@@ -386,26 +396,28 @@ module assembly_3d() {
                 // 3. Remaining standard spacers (only when more than one spacer layer)
                 if (num_spacer_layers >= 2) {
                     for (l = [2 : num_spacer_layers]) {
-                        translate([0, 0, l * wood_thickness]) {
+                        translate([0, 0, l * wood_thickness + explode * l]) {
                             color("Chocolate")
                                 linear_extrude(height = wood_thickness)
                                 spacer_layer_2d();
                         }
                     }
                 }
-                
-                // 4. Plexiglass Mirror (semi-transparent light-blue preview)
+
+                // 4. Plexiglass Mirror (semi-transparent light-blue preview).
+                // Lifted just above the spacer stack when exploded so it reads as
+                // dropping into the pocket.
                 if (show_mirror) {
-                    translate([0, 0, wood_thickness]) {
+                    translate([0, 0, wood_thickness + explode * (num_spacer_layers + 0.7)]) {
                         color("LightCyan", 0.6)
                             linear_extrude(height = plexiglass_thickness)
                             plexiglass_2d();
                     }
                 }
-                
+
                 // 5. Front Bezel / Frame
                 // Rests on the proud plate (top of mirror), not the spacer ring.
-                translate([0, 0, wood_thickness + plexiglass_thickness]) {
+                translate([0, 0, wood_thickness + plexiglass_thickness + explode * (num_spacer_layers + 1.5)]) {
                     color("BurlyWood")
                         linear_extrude(height = wood_thickness)
                             front_plate_2d();
@@ -413,7 +425,7 @@ module assembly_3d() {
 
                 // 6. Front Decorative Overlay / Texture Layer (covers alignment holes)
                 if (include_decor_overlay) {
-                    translate([0, 0, wood_thickness + plexiglass_thickness + wood_thickness]) {
+                    translate([0, 0, wood_thickness + plexiglass_thickness + wood_thickness + explode * (num_spacer_layers + 2.5)]) {
                         color("SandyBrown")
                             linear_extrude(height = decor_thickness)
                             decor_plate_2d();
