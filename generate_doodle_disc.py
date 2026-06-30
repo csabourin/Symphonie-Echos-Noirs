@@ -1130,33 +1130,84 @@ def point_to_slots_distance(px, py, slots):
                     best = d
     return best
 
-def place_slot_label(own_slot, all_slots, slot_width, font_size, margin=0.6, max_offset=16.0):
-    """Position a raised slot number so its body clears every trace.
+def slot_sample_points(slot, n=14):
+    """Evenly spaced points along a slot centerline with their outward normals."""
+    pieces = []
+    for poly in slot_subpaths(slot):
+        for idx in range(len(poly) - 1):
+            p1, p2 = poly[idx], poly[idx + 1]
+            seg = ((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2) ** 0.5
+            if seg > 0:
+                pieces.append((p1, p2, seg))
+    total = sum(seg for _, _, seg in pieces)
+    if total == 0.0:
+        mx, my = slot_label_anchor(slot)
+        return [(mx, my, 0.0, 1.0)]
 
-    A raised number sitting over a slot would block the pencil, so we start at the
-    slot's midpoint and spiral outward (nearest spot first) until the label's
-    footprint clears all slot centerlines by ``slot_width/2 + label_radius + margin``.
-    Falls back to the position with the most clearance if nothing fully clears.
+    pts = []
+    for s in range(1, n + 1):
+        target = total * s / (n + 1)
+        acc = 0.0
+        for p1, p2, seg in pieces:
+            if acc + seg >= target:
+                t = (target - acc) / seg
+                mx = p1[0] + t * (p2[0] - p1[0])
+                my = p1[1] + t * (p2[1] - p1[1])
+                nx, ny = -(p2[1] - p1[1]) / seg, (p2[0] - p1[0]) / seg
+                pts.append((mx, my, nx, ny))
+                break
+            acc += seg
+    return pts
+
+def place_slot_label(own_slot, all_slots, placed_labels, slot_width, font_size, margin=0.5):
+    """Place a raised slot number hugging its OWN slot, clear of traces and other labels.
+
+    The number must read as belonging to its line, so we offset it the *minimum*
+    amount off a point on its own centerline -- just enough to clear the trace -- and
+    only push further if that spot still hits another trace or an already-placed
+    label. Among valid spots we keep the one closest to the slot (smallest offset),
+    preferring the more open side. This keeps each number next to its own stroke
+    while guaranteeing it never sits on a trace or on another number.
     """
-    mx, my = slot_label_anchor(own_slot)
-    label_radius = font_size * 0.75          # half-extent of the glyph footprint
-    required = slot_width / 2.0 + label_radius + margin
+    glyph = font_size * 0.65                 # half-extent of a 1-2 digit glyph
+    samples = slot_sample_points(own_slot)
+    trace_clear = slot_width / 2.0 + glyph   # number body vs any trace edge
+    label_clear = 2.0 * glyph + 0.4          # number body vs another number
+    base = slot_width / 2.0 + glyph + margin
+
     best = None
-    d = slot_width / 2.0 + label_radius * 0.5
-    step = 0.75
-    dirs = 24
-    while d <= max_offset:
-        for k in range(dirs):
-            ang = 2.0 * math.pi * k / dirs
-            px = mx + d * math.cos(ang)
-            py = my + d * math.sin(ang)
-            clr = point_to_slots_distance(px, py, all_slots)
-            if clr >= required:
-                return (px, py)
-            if best is None or clr > best[0]:
-                best = (clr, px, py)
-        d += step
-    return (best[1], best[2]) if best else (mx, my)
+    for extra in (0.0, 1.0, 2.0, 3.0, 4.5, 6.0, 8.0):
+        off = base + extra
+        for mx, my, nx, ny in samples:
+            for sign in (1.0, -1.0):
+                px = mx + sign * nx * off
+                py = my + sign * ny * off
+                d_trace = point_to_slots_distance(px, py, all_slots)
+                if d_trace < trace_clear:
+                    continue
+                d_label = min((((px-lx)**2 + (py-ly)**2) ** 0.5) for lx, ly in placed_labels) if placed_labels else float('inf')
+                if d_label < label_clear:
+                    continue
+                # Valid spot: prefer small offset, then the more open side.
+                score = (-off, d_trace + min(d_label, 8.0))
+                if best is None or score > best[0]:
+                    best = (score, px, py)
+        if best is not None:
+            return (best[1], best[2])
+
+    # Nothing fully cleared: fall back to the least-bad spot found anywhere.
+    fb = None
+    for mx, my, nx, ny in samples:
+        for sign in (1.0, -1.0):
+            px = mx + sign * nx * base
+            py = my + sign * ny * base
+            d_trace = point_to_slots_distance(px, py, all_slots)
+            if fb is None or d_trace > fb[0]:
+                fb = (d_trace, px, py)
+    if fb is not None:
+        return (fb[1], fb[2])
+    mx, my = slot_label_anchor(own_slot)
+    return (mx, my)
 
 # ==========================================
 # OpenSCAD Writer
@@ -1186,7 +1237,7 @@ engrave_depth = 0.8;
 number_height = 0.6; // Height the numbers stand proud of the disc face (for a colour swap)
 font_name = "Liberation Sans:style=Bold";
 font_size_rim = 4.5;
-font_size_slot = 3.5;
+font_size_slot = 3.0;
 theta_index = {theta_index}; // Index pointer angle (12 o'clock = 90 deg)
 
 // Holder frame parameters
@@ -1517,11 +1568,12 @@ def main():
         angle = best_m[i] * (2 * math.pi / N) - theta_index_rad
         slots.append(rotate_segment(segments[i], angle))
 
-    # Place each raised slot number clear of EVERY trace so it can't block the pencil.
-    font_size_slot = 3.5  # must match font_size_slot in the SCAD template
+    # Place each raised slot number hugging its own slot, clear of every trace (so it
+    # can't block the pencil) and of every other label (so numbers never overlap).
+    font_size_slot = 3.0  # must match font_size_slot in the SCAD template
     label_positions = []
     for i in range(N):
-        lx, ly = place_slot_label(slots[i], slots, args.width, font_size_slot)
+        lx, ly = place_slot_label(slots[i], slots, label_positions, args.width, font_size_slot)
         label_positions.append((lx, ly))
         
     # Compute rim numbers mapping
