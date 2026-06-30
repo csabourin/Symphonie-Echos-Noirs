@@ -4,6 +4,7 @@ import math
 import xml.etree.ElementTree as ET
 import random
 import argparse
+import json
 
 # ==========================================
 # SVG Path Tokenizer & Parser
@@ -1372,9 +1373,255 @@ module holder_frame() {{
 }}
 """
 
+def prepare_polylines(args):
+    """Extract and normalize an SVG into centered, scaled, simplified polylines.
+
+    Returns ``(scaled_polylines, meta)``. The polylines are already in disc/CAD
+    millimetres: y-up, centered on the chosen rotation origin, and scaled to fill
+    the drawing area. ``meta`` carries the disc geometry needed to interpret them
+    (so the interactive editor and the --segments path stay self-describing).
+    """
+    print(f"Reading SVG file: {args.svg_file}")
+    raw_polylines = extract_polylines_from_svg(args.svg_file)
+    print(f"Extracted {len(raw_polylines)} paths from SVG.")
+
+    filled, total = classify_svg_paths(args.svg_file)
+    if total and filled / total >= 0.5:
+        print(
+            f"Note: {filled}/{total} shapes are filled (fill set, stroke=none). This generator "
+            f"traces the CONTOUR (outline) of filled art, so thin filled lines appear as doubled, "
+            f"offset strokes -- expected, and fine if you want the contour. For single-stroke output "
+            f"instead, use centerline/stroked art (fill:none with strokes)."
+        )
+
+    # Filter out empty/0-length/single-point paths
+    filtered_polylines = []
+    for poly in raw_polylines:
+        if len(poly) < 2:
+            continue
+        plen = sum(((poly[idx+1][0] - poly[idx][0])**2 + (poly[idx+1][1] - poly[idx][1])**2)**0.5 for idx in range(len(poly)-1))
+        if plen > 0.01:
+            filtered_polylines.append(poly)
+
+    print(f"Filtered out {len(raw_polylines) - len(filtered_polylines)} zero-length or single-point paths.")
+    raw_polylines = filtered_polylines
+
+    if not raw_polylines:
+        print("Error: No valid paths found in SVG file after filtering.")
+        sys.exit(1)
+
+    # Flip Y axis (SVG goes down, CAD goes up)
+    polylines = []
+    for poly in raw_polylines:
+        flipped = [(pt[0], -pt[1]) for pt in poly]
+        polylines.append(flipped)
+
+    # Find bounding box
+    min_x = min(pt[0] for poly in polylines for pt in poly)
+    max_x = max(pt[0] for poly in polylines for pt in poly)
+    min_y = min(pt[1] for poly in polylines for pt in poly)
+    max_y = max(pt[1] for poly in polylines for pt in poly)
+
+    # Choose the rotation origin. The bounding-box center often sits on a stroke,
+    # which causes collisions no notch permutation can resolve; the "clearance"
+    # mode instead drops the origin into the largest empty zone of the artwork.
+    if args.center_mode == "bbox":
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        center_clearance = point_clearance(cx, cy, polylines)
+    else:
+        _, cx, cy, center_clearance, _ = choose_rotation_center(polylines)
+
+    # Center polylines
+    centered_polylines = []
+    for poly in polylines:
+        centered_polylines.append([(pt[0] - cx, pt[1] - cy) for pt in poly])
+
+    # Find maximum radius
+    max_r = max(math.sqrt(pt[0]**2 + pt[1]**2) for poly in centered_polylines for pt in poly)
+    if max_r == 0:
+        print("Error: The drawing has zero size.")
+        sys.exit(1)
+
+    # Scale to fit inside the annulus. Outer numbers rim starts at
+    # disc_radius - rim_margin; keep a 3mm buffer inside that.
+    rim_margin = 13.0
+    r_max_drawing = args.radius - rim_margin - 3.0
+
+    print(f"Drawing bounds: X[{min_x:.1f}, {max_x:.1f}], Y[{min_y:.1f}, {max_y:.1f}]")
+    print(f"Rotation origin ({args.center_mode}): ({cx:.1f}, {cy:.1f}), max radius {max_r:.1f}mm")
+
+    scale_factor = r_max_drawing / max_r
+    center_clearance_mm = center_clearance * scale_factor
+    print(f"Empty zone around rotation center: {center_clearance_mm:.2f}mm radius")
+    if center_clearance_mm < args.dmin:
+        print(
+            f"Warning: strokes pass within {center_clearance_mm:.2f}mm of the rotation center "
+            f"(< d_min {args.dmin:.2f}mm). Some collisions may be unavoidable; try --center-mode "
+            f"clearance, a larger --radius, or artwork with a clearer empty center."
+        )
+    scaled_polylines = []
+    for poly in centered_polylines:
+        scaled_polylines.append([(pt[0] * scale_factor, pt[1] * scale_factor) for pt in poly])
+
+    print(f"Scaled drawing to fit inside max radius of {r_max_drawing:.1f}mm (scale factor: {scale_factor:.4f})")
+
+    points_before = sum(len(poly) for poly in scaled_polylines)
+    scaled_polylines = simplify_polylines(scaled_polylines, args.simplify_tolerance)
+    points_after = sum(len(poly) for poly in scaled_polylines)
+    if args.simplify_tolerance > 0.0:
+        print(
+            f"Simplified paths with {args.simplify_tolerance:.3f}mm tolerance: "
+            f"{points_before} -> {points_after} point(s)."
+        )
+    if not scaled_polylines:
+        print("Error: No valid paths remain after simplification.")
+        sys.exit(1)
+
+    meta = {
+        "units": "mm",
+        "disc_radius": args.radius,
+        "slot_width": args.width,
+        "dmin": args.dmin,
+        "rim_margin": rim_margin,
+        "r_max_drawing": r_max_drawing,
+        "scale_factor": scale_factor,
+        "center_clearance_mm": center_clearance_mm,
+        "suggested_steps": 16,
+    }
+    return scaled_polylines, meta
+
+
+def write_export_json(scaled_polylines, meta, path):
+    """Dump the prepared drawing for the HTML segment editor to consume."""
+    subpaths = [[[round(x, 4), round(y, 4)] for (x, y) in poly] for poly in scaled_polylines]
+    data = {"version": 1, "meta": meta, "subpaths": subpaths}
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Error writing export file {path}: {e}")
+        sys.exit(1)
+    print(f"Wrote interactive editor data: {path}")
+    print(f"  {len(subpaths)} subpath(s). Open segment_editor.html and load this file.")
+
+
+def write_disc_scad(segments, best_m, collisions, min_dist, N, radius, width, output):
+    """Rotate segments into disc coords, place labels, and write the OpenSCAD file.
+
+    Shared by the automatic layout path and the --segments (user-defined) path.
+    """
+    theta_index_rad = math.pi / 2.0  # index pointer at 12 o'clock
+    total_len = sum(slot_length(s) for s in segments)
+    avg_stroke_len = total_len / N if N else 0.0
+
+    if collisions > 0:
+        print(f"Warning: {collisions} slot overlap(s) remain in this layout.")
+        print("Consider fewer/longer segments, a larger disc radius, a smaller --width, "
+              "raising --max-iters/--restarts, or re-editing the segments.")
+    else:
+        print(
+            f"Success! A collision-free slot layout was found with {N} step(s). "
+            f"Average stroke length: {avg_stroke_len:.2f}mm; minimum slot spacing: {min_dist:.3f}mm."
+        )
+
+    # Final slots rotated into disc coordinates by their assigned notch.
+    slots = []
+    for i in range(N):
+        angle = best_m[i] * (2 * math.pi / N) - theta_index_rad
+        slots.append(rotate_segment(segments[i], angle))
+
+    # Raised slot numbers hugging their own slot, clear of traces and other labels.
+    font_size_slot = 3.0  # must match font_size_slot in the SCAD template
+    label_positions = []
+    for i in range(N):
+        lx, ly = place_slot_label(slots[i], slots, label_positions, width, font_size_slot)
+        label_positions.append((lx, ly))
+
+    # Which drawing step (1..N) sits at each notch index.
+    rim_numbers = [0] * N
+    for i in range(N):
+        rim_numbers[best_m[i]] = i + 1
+
+    slots_data = "[\n"
+    for s in slots:
+        slots_data += f"    {format_scad_slot(s)},\n"
+    slots_data += "]"
+
+    labels_data = "[\n"
+    for l in label_positions:
+        labels_data += f"    [{l[0]:.4f}, {l[1]:.4f}],\n"
+    labels_data += "]"
+
+    rim_numbers_data = str(rim_numbers)
+
+    scad_content = SCAD_TEMPLATE.format(
+        disc_radius=radius,
+        disc_thickness=2.0,  # default thickness
+        slot_width=width,
+        N=N,
+        theta_index=90,
+        slots_data=slots_data,
+        labels_data=labels_data,
+        rim_numbers_data=rim_numbers_data,
+    )
+
+    print(f"Writing OpenSCAD file: {output}")
+    try:
+        with open(output, "w") as f:
+            f.write(scad_content)
+        print("Generation complete!")
+    except Exception as e:
+        print(f"Error writing to output file: {e}")
+        sys.exit(1)
+
+
+def run_segments_mode(args):
+    """Build the disc from user-defined segments (from the HTML editor)."""
+    try:
+        with open(args.segments, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Error reading segments file {args.segments}: {e}")
+        sys.exit(1)
+
+    raw_segments = data.get("segments", [])
+    segments = []
+    for seg in raw_segments:
+        subpaths = []
+        for sp in seg.get("subpaths", []):
+            pts = [(float(p[0]), float(p[1])) for p in sp if len(p) >= 2]
+            if len(pts) >= 2 and polyline_length(pts) > 1e-9:
+                subpaths.append(pts)
+        if subpaths:
+            segments.append(subpaths)
+
+    if not segments:
+        print("Error: segments file contains no usable segments.")
+        sys.exit(1)
+
+    N = len(segments)
+    meta = data.get("meta", {})
+    radius = float(meta.get("disc_radius", args.radius))
+    width = float(meta.get("slot_width", args.width))
+    dmin = float(meta.get("dmin", args.dmin))
+
+    print(f"Loaded {N} user-defined segment(s) from {args.segments}.")
+    print(f"Disc radius {radius:.1f}mm, slot width {width:.1f}mm, d_min {dmin:.2f}mm.")
+
+    best_m, collisions, min_dist, _cost = optimize_permutation(
+        segments, N, dmin, max_iters=args.max_iters, restarts=args.restarts
+    )
+    write_disc_scad(segments, best_m, collisions, min_dist, N, radius, width, args.output)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Twist Art / Rotadraw Doodle Disc generator")
-    parser.add_argument("svg_file", help="Input SVG file containing vector paths")
+    parser.add_argument("svg_file", nargs="?", help="Input SVG file containing vector paths (omit when using --segments)")
+    parser.add_argument("--export-json", metavar="PATH", default=None,
+                        help="Prepare the SVG and write drawing+disc data for the HTML segment editor, then stop")
+    parser.add_argument("--segments", metavar="PATH", default=None,
+                        help="Build the disc from user-defined segments (JSON exported by segment_editor.html) instead of auto-splitting")
     parser.add_argument("-n", "--steps", type=int, default=64, help="Maximum number of rotation steps to try (default: 64)")
     parser.add_argument("--min-steps", type=int, default=8, help="Fewest rotation steps to try when minimizing (default: 8)")
     parser.add_argument("--fixed-steps", action="store_true", help="Use exactly --steps instead of searching for the minimum collision-free count")
@@ -1404,6 +1651,22 @@ def main():
     if args.dmin <= 0:
         print("Error: --dmin must be positive.")
         sys.exit(1)
+    if args.max_iters < 1:
+        print("Error: --max-iters must be at least 1.")
+        sys.exit(1)
+    if args.restarts < 1:
+        print("Error: --restarts must be at least 1.")
+        sys.exit(1)
+
+    # --- Mode: build from user-defined segments (HTML editor output) ---
+    if args.segments:
+        run_segments_mode(args)
+        return
+
+    # --- SVG-based modes (auto layout and editor export) need a source file ---
+    if not args.svg_file:
+        print("Error: an SVG file is required (or use --segments PATH).")
+        sys.exit(1)
     if args.simplify_tolerance < 0:
         print("Error: --simplify-tolerance must be non-negative.")
         sys.exit(1)
@@ -1416,111 +1679,15 @@ def main():
     if args.min_steps > args.steps:
         print("Error: --min-steps must be less than or equal to --steps.")
         sys.exit(1)
-    if args.max_iters < 1:
-        print("Error: --max-iters must be at least 1.")
-        sys.exit(1)
-    if args.restarts < 1:
-        print("Error: --restarts must be at least 1.")
-        sys.exit(1)
-    
-    print(f"Reading SVG file: {args.svg_file}")
-    raw_polylines = extract_polylines_from_svg(args.svg_file)
-    print(f"Extracted {len(raw_polylines)} paths from SVG.")
 
-    filled, total = classify_svg_paths(args.svg_file)
-    if total and filled / total >= 0.5:
-        print(
-            f"Note: {filled}/{total} shapes are filled (fill set, stroke=none). This generator "
-            f"traces the CONTOUR (outline) of filled art, so thin filled lines appear as doubled, "
-            f"offset strokes -- expected, and fine if you want the contour. For single-stroke output "
-            f"instead, use centerline/stroked art (fill:none with strokes)."
-        )
-    
-    # Filter out empty/0-length/single-point paths
-    filtered_polylines = []
-    for poly in raw_polylines:
-        if len(poly) < 2:
-            continue
-        plen = sum(((poly[idx+1][0] - poly[idx][0])**2 + (poly[idx+1][1] - poly[idx][1])**2)**0.5 for idx in range(len(poly)-1))
-        if plen > 0.01:
-            filtered_polylines.append(poly)
-            
-    print(f"Filtered out {len(raw_polylines) - len(filtered_polylines)} zero-length or single-point paths.")
-    raw_polylines = filtered_polylines
-    
-    if not raw_polylines:
-        print("Error: No valid paths found in SVG file after filtering.")
-        sys.exit(1)
-        
-    # Flip Y axis (SVG goes down, CAD goes up)
-    polylines = []
-    for poly in raw_polylines:
-        flipped = [(pt[0], -pt[1]) for pt in poly]
-        polylines.append(flipped)
-        
-    # Find bounding box
-    min_x = min(pt[0] for poly in polylines for pt in poly)
-    max_x = max(pt[0] for poly in polylines for pt in poly)
-    min_y = min(pt[1] for poly in polylines for pt in poly)
-    max_y = max(pt[1] for poly in polylines for pt in poly)
+    scaled_polylines, meta = prepare_polylines(args)
 
-    # Choose the rotation origin. The bounding-box center often sits on a stroke,
-    # which causes collisions no notch permutation can resolve; the "clearance"
-    # mode instead drops the origin into the largest empty zone of the artwork.
-    if args.center_mode == "bbox":
-        cx = (min_x + max_x) / 2.0
-        cy = (min_y + max_y) / 2.0
-        center_clearance = point_clearance(cx, cy, polylines)
-    else:
-        _, cx, cy, center_clearance, _ = choose_rotation_center(polylines)
+    # --- Mode: export prepared drawing for the interactive segment editor ---
+    if args.export_json:
+        write_export_json(scaled_polylines, meta, args.export_json)
+        return
 
-    # Center polylines
-    centered_polylines = []
-    for poly in polylines:
-        centered_polylines.append([(pt[0] - cx, pt[1] - cy) for pt in poly])
-
-    # Find maximum radius
-    max_r = max(math.sqrt(pt[0]**2 + pt[1]**2) for poly in centered_polylines for pt in poly)
-    if max_r == 0:
-        print("Error: The drawing has zero size.")
-        sys.exit(1)
-
-    # Scale to fit inside the annulus
-    # Radius margin: outer numbers rim area starts at disc_radius - rim_margin
-    # We want drawing to fit within disc_radius - rim_margin - 3mm (buffer)
-    rim_margin = 13.0
-    r_max_drawing = args.radius - rim_margin - 3.0
-
-    print(f"Drawing bounds: X[{min_x:.1f}, {max_x:.1f}], Y[{min_y:.1f}, {max_y:.1f}]")
-    print(f"Rotation origin ({args.center_mode}): ({cx:.1f}, {cy:.1f}), max radius {max_r:.1f}mm")
-
-    scale_factor = r_max_drawing / max_r
-    center_clearance_mm = center_clearance * scale_factor
-    print(f"Empty zone around rotation center: {center_clearance_mm:.2f}mm radius")
-    if center_clearance_mm < args.dmin:
-        print(
-            f"Warning: strokes pass within {center_clearance_mm:.2f}mm of the rotation center "
-            f"(< d_min {args.dmin:.2f}mm). Some collisions may be unavoidable; try --center-mode "
-            f"clearance, a larger --radius, or artwork with a clearer empty center."
-        )
-    scaled_polylines = []
-    for poly in centered_polylines:
-        scaled_polylines.append([(pt[0] * scale_factor, pt[1] * scale_factor) for pt in poly])
-        
-    print(f"Scaled drawing to fit inside max radius of {r_max_drawing:.1f}mm (scale factor: {scale_factor:.4f})")
-
-    points_before = sum(len(poly) for poly in scaled_polylines)
-    scaled_polylines = simplify_polylines(scaled_polylines, args.simplify_tolerance)
-    points_after = sum(len(poly) for poly in scaled_polylines)
-    if args.simplify_tolerance > 0.0:
-        print(
-            f"Simplified paths with {args.simplify_tolerance:.3f}mm tolerance: "
-            f"{points_before} -> {points_after} point(s)."
-        )
-    if not scaled_polylines:
-        print("Error: No valid paths remain after simplification.")
-        sys.exit(1)
-
+    # --- Mode: automatic equal-length splitting + layout ---
     try:
         if args.fixed_steps:
             layout = solve_layout_for_steps(
@@ -1543,77 +1710,16 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
 
-    N = layout["N"]
-    segments = layout["segments"]
-    best_m = layout["assignment"]
-    collisions = layout["collisions"]
-    min_dist = layout["min_dist"]
-    avg_stroke_len = total_polyline_length(scaled_polylines) / N
-        
-    # The index pointer is at 12 o'clock (90 degrees / pi/2 radians)
-    theta_index_rad = math.pi / 2.0
-    
-    if collisions > 0:
-        print(f"Warning: Simulated Annealing could not resolve all collisions. {collisions} overlap(s) remain.")
-        print("Consider increasing --steps, increasing the disc radius, reducing --width, raising --max-iters/--restarts, or simplifying the SVG.")
-    else:
-        print(
-            f"Success! A collision-free slot layout was found with {N} step(s). "
-            f"Average stroke length: {avg_stroke_len:.2f}mm; minimum slot spacing: {min_dist:.3f}mm."
-        )
-        
-    # Compute the final slots rotated into disc coordinates
-    slots = []
-    for i in range(N):
-        angle = best_m[i] * (2 * math.pi / N) - theta_index_rad
-        slots.append(rotate_segment(segments[i], angle))
-
-    # Place each raised slot number hugging its own slot, clear of every trace (so it
-    # can't block the pencil) and of every other label (so numbers never overlap).
-    font_size_slot = 3.0  # must match font_size_slot in the SCAD template
-    label_positions = []
-    for i in range(N):
-        lx, ly = place_slot_label(slots[i], slots, label_positions, args.width, font_size_slot)
-        label_positions.append((lx, ly))
-        
-    # Compute rim numbers mapping
-    rim_numbers = [0] * N
-    for i in range(N):
-        notch = best_m[i]
-        rim_numbers[notch] = i + 1
-        
-    # Write OpenSCAD file
-    slots_data = "[\n"
-    for s in slots:
-        slots_data += f"    {format_scad_slot(s)},\n"
-    slots_data += "]"
-    
-    labels_data = "[\n"
-    for l in label_positions:
-        labels_data += f"    [{l[0]:.4f}, {l[1]:.4f}],\n"
-    labels_data += "]"
-    
-    rim_numbers_data = str(rim_numbers)
-    
-    scad_content = SCAD_TEMPLATE.format(
-        disc_radius=args.radius,
-        disc_thickness=2.0, # default thickness
-        slot_width=args.width,
-        N=N,
-        theta_index=90,
-        slots_data=slots_data,
-        labels_data=labels_data,
-        rim_numbers_data=rim_numbers_data
+    write_disc_scad(
+        layout["segments"],
+        layout["assignment"],
+        layout["collisions"],
+        layout["min_dist"],
+        layout["N"],
+        args.radius,
+        args.width,
+        args.output,
     )
-    
-    print(f"Writing OpenSCAD file: {args.output}")
-    try:
-        with open(args.output, "w") as f:
-            f.write(scad_content)
-        print("Generation complete!")
-    except Exception as e:
-        print(f"Error writing to output file: {e}")
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doodle Disc &mdash; Segment Editor</title>
+<style>
+  :root { --bg:#1e2128; --panel:#272b34; --line:#3a3f4b; --txt:#e6e8ec; --muted:#9aa3b2; --accent:#5b9dff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .hint { color:var(--muted); font-size:12.5px; }
+  .wrap { display:flex; gap:0; align-items:stretch; min-height:calc(100vh - 50px); }
+  .stage { flex:1; display:flex; align-items:center; justify-content:center; padding:18px; position:relative; }
+  canvas { background:#161922; border-radius:10px; box-shadow:0 1px 0 #000 inset; cursor:crosshair; touch-action:none; }
+  .side { width:330px; border-left:1px solid var(--line); background:var(--panel); padding:14px; overflow-y:auto; max-height:calc(100vh - 50px); }
+  .grp { margin-bottom:16px; }
+  .grp h2 { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
+  button { background:#323845; color:var(--txt); border:1px solid var(--line); border-radius:7px; padding:6px 10px; font-size:13px; cursor:pointer; }
+  button:hover { background:#3b4250; }
+  button.on { background:var(--accent); border-color:var(--accent); color:#0b1220; font-weight:600; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#0b1220; font-weight:600; }
+  button:disabled { opacity:.45; cursor:default; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  input[type=number] { width:64px; background:#1b1f27; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 6px; }
+  .stat { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px dotted var(--line); }
+  .stat b { font-variant-numeric:tabular-nums; }
+  .seglist { display:flex; flex-direction:column; gap:4px; }
+  .seg { display:flex; align-items:center; gap:8px; padding:5px 7px; border:1px solid var(--line); border-radius:6px; cursor:pointer; }
+  .seg.sel { outline:2px solid var(--accent); }
+  .sw { width:14px; height:14px; border-radius:3px; flex:0 0 auto; }
+  .seg .nm { flex:1; }
+  .seg .ln { color:var(--muted); font-variant-numeric:tabular-nums; font-size:12px; }
+  .seg .x { color:var(--muted); padding:0 2px; }
+  .seg .x:hover { color:#ff7a7a; }
+  .modes button { flex:1; min-width:0; }
+  .note { color:var(--muted); font-size:12px; }
+  .warn { color:#ffcf6b; }
+  .ok { color:#7ad08a; }
+  code { background:#1b1f27; padding:1px 5px; border-radius:4px; font-size:12px; }
+  a.dl { display:inline-block; }
+  #drop { position:absolute; inset:18px; border:2px dashed var(--line); border-radius:12px; display:flex; align-items:center; justify-content:center; color:var(--muted); text-align:center; pointer-events:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Doodle Disc &middot; Segment Editor</h1>
+  <span class="hint">Load the JSON from <code>python generate_doodle_disc.py art.svg --export-json disc.json</code>, edit segments, download, then run with <code>--segments</code>.</span>
+</header>
+<div class="wrap">
+  <div class="stage">
+    <canvas id="cv" width="720" height="720"></canvas>
+    <div id="drop">Load a <b>disc.json</b> export to begin&nbsp;&mdash;&nbsp;use the Load button on the right.</div>
+  </div>
+  <aside class="side">
+    <div class="grp">
+      <h2>Data</h2>
+      <div class="row">
+        <input type="file" id="file" accept="application/json,.json" style="display:none">
+        <button id="loadBtn">Load disc.json&hellip;</button>
+        <button id="dlBtn" class="primary" disabled>Download segments.json</button>
+      </div>
+      <div id="metaInfo" class="note" style="margin-top:8px"></div>
+    </div>
+
+    <div class="grp">
+      <h2>Steps (auto-split)</h2>
+      <div class="row">
+        <label>N <input type="number" id="nSteps" min="1" max="200" value="16"></label>
+        <button id="splitBtn">Auto-split into N</button>
+      </div>
+      <div class="note" style="margin-top:6px">Splits the whole drawing into N equal-length segments. Then edit below.</div>
+    </div>
+
+    <div class="grp">
+      <h2>Edit tool</h2>
+      <div class="row modes">
+        <button data-mode="select" class="on">Select / Drag</button>
+        <button data-mode="split">Split</button>
+        <button data-mode="add">Add</button>
+        <button data-mode="merge">Merge</button>
+        <button data-mode="delete">Delete</button>
+      </div>
+      <div id="modeHelp" class="note" style="margin-top:6px"></div>
+    </div>
+
+    <div class="grp">
+      <h2>Coverage</h2>
+      <div class="stat"><span>Total path length</span><b id="stTotal">&ndash;</b></div>
+      <div class="stat"><span>Segments (= steps)</span><b id="stCount">0</b></div>
+      <div class="stat"><span>Covered</span><b id="stCov">&ndash;</b></div>
+      <div class="stat"><span>Gaps</span><b id="stGaps">&ndash;</b></div>
+      <div class="stat"><span>Overlaps</span><b id="stOver">&ndash;</b></div>
+    </div>
+
+    <div class="grp">
+      <h2>Segments</h2>
+      <div id="seglist" class="seglist"></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+"use strict";
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const SIZE = 720;            // CSS px (square)
+const dpr = window.devicePixelRatio || 1;
+cv.style.width = SIZE + 'px'; cv.style.height = SIZE + 'px';
+cv.width = SIZE * dpr; cv.height = SIZE * dpr;
+ctx.scale(dpr, dpr);
+
+// ---- State ----
+let meta = null;            // disc geometry from the export
+let subpaths = [];          // array of [ [x,y], ... ] (mm, y-up, centered)
+let arc = [];               // per-subpath arc-length model
+let totalLen = 0;
+let segments = [];          // { id, a, b }  global arc-length intervals
+let nextId = 1;
+let selected = -1;          // segment id
+let mode = 'select';
+let scale = 1, cxp = SIZE/2, cyp = SIZE/2, discR = 1;
+
+let hover = null;           // { s, x, y } nearest point on path under cursor
+let pendingFrom = null;     // arc-length s for "add" first click
+let mergeFirst = -1;        // id for "merge" first click
+let drag = null;            // { value, members:[{seg,end}], lo, hi }
+
+const MIN_SEG = () => Math.max(0.5, totalLen * 0.002);
+
+const modeHelps = {
+  select: 'Click a segment to select it. Drag the round handles to move where one segment ends and the next begins.',
+  split:  'Click anywhere on a segment to cut it into two at that point.',
+  add:    'Click a FROM point on the path, then a TO point, to create a new segment (fills a gap). Right-click cancels.',
+  merge:  'Click one segment, then an adjacent one, to fuse them into a single segment (absorbs any gap between).',
+  delete: 'Click a segment to remove it, leaving its part of the drawing untraced.'
+};
+
+// ---- Geometry helpers ----
+function dist(a, b){ const dx=a[0]-b[0], dy=a[1]-b[1]; return Math.hypot(dx,dy); }
+
+function buildArcModel(){
+  arc = []; totalLen = 0;
+  for (const pts of subpaths){
+    const cum = [0];
+    for (let i=0;i<pts.length-1;i++) cum.push(cum[i] + dist(pts[i], pts[i+1]));
+    const len = cum[cum.length-1];
+    if (len <= 0) continue;
+    arc.push({ pts, cum, len, gOffset: totalLen });
+    totalLen += len;
+  }
+}
+
+function localPoint(e, l){
+  l = Math.max(0, Math.min(e.len, l));
+  // binary-ish linear scan (subpaths are small after simplification)
+  for (let i=0;i<e.pts.length-1;i++){
+    if (e.cum[i+1] >= l){
+      const seg = e.cum[i+1]-e.cum[i];
+      const t = seg>0 ? (l-e.cum[i])/seg : 0;
+      return [ e.pts[i][0] + t*(e.pts[i+1][0]-e.pts[i][0]),
+               e.pts[i][1] + t*(e.pts[i+1][1]-e.pts[i][1]) ];
+    }
+  }
+  return e.pts[e.pts.length-1].slice();
+}
+
+function locateGlobal(s){
+  s = Math.max(0, Math.min(totalLen, s));
+  let e = arc[0];
+  for (const a of arc){ if (s >= a.gOffset) e = a; else break; }
+  const p = localPoint(e, s - e.gOffset);
+  return { x:p[0], y:p[1] };
+}
+
+function subRangeLocal(e, la, lb){
+  la = Math.max(0, Math.min(e.len, la));
+  lb = Math.max(0, Math.min(e.len, lb));
+  if (lb <= la + 1e-9) return [];
+  const out = [ localPoint(e, la) ];
+  for (let i=0;i<e.pts.length;i++){
+    if (e.cum[i] > la + 1e-9 && e.cum[i] < lb - 1e-9) out.push(e.pts[i].slice());
+  }
+  out.push(localPoint(e, lb));
+  return out;
+}
+
+// One global interval -> list of sub-polylines (split at original subpath breaks)
+function extractRange(a, b){
+  const pieces = [];
+  for (const e of arc){
+    const g0 = e.gOffset, g1 = e.gOffset + e.len;
+    const lo = Math.max(a, g0), hi = Math.min(b, g1);
+    if (hi > lo + 1e-9){
+      const pl = subRangeLocal(e, lo - g0, hi - g0);
+      if (pl.length >= 2) pieces.push(pl);
+    }
+  }
+  return pieces;
+}
+
+function nearestGlobalS(wx, wy){
+  let best = { dist: Infinity, s: 0, x: 0, y: 0 };
+  for (const e of arc){
+    for (let i=0;i<e.pts.length-1;i++){
+      const x1=e.pts[i][0], y1=e.pts[i][1], x2=e.pts[i+1][0], y2=e.pts[i+1][1];
+      const dx=x2-x1, dy=y2-y1, L2=dx*dx+dy*dy;
+      let t = L2>0 ? ((wx-x1)*dx + (wy-y1)*dy)/L2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const px=x1+t*dx, py=y1+t*dy;
+      const d = Math.hypot(wx-px, wy-py);
+      if (d < best.dist){
+        const seg = e.cum[i+1]-e.cum[i];
+        best = { dist:d, s: e.gOffset + e.cum[i] + t*seg, x:px, y:py };
+      }
+    }
+  }
+  return best;
+}
+
+// ---- Segment model ops ----
+function segColor(idx){ return `hsl(${(idx*47)%360} 75% 60%)`; }
+function sortSegs(){ segments.sort((a,b)=> a.a - b.a); }
+function segById(id){ return segments.find(s=>s.id===id); }
+function makeSeg(a, b){ return { id: nextId++, a, b }; }
+
+function autoSplit(n){
+  segments = [];
+  for (let i=0;i<n;i++) segments.push(makeSeg(totalLen*i/n, totalLen*(i+1)/n));
+  selected = -1; pendingFrom = null; mergeFirst = -1;
+  refresh();
+}
+
+function segAt(s){
+  let found = -1, small = Infinity;
+  for (const seg of segments){
+    if (s >= seg.a - 1e-6 && s <= seg.b + 1e-6){
+      const L = seg.b - seg.a;
+      if (L < small){ small = L; found = seg.id; }
+    }
+  }
+  return found;
+}
+
+function coverage(){
+  if (!segments.length) return { covered:0, gaps: totalLen>0?1:0, overlaps:0 };
+  const iv = segments.map(s=>[s.a,s.b]).sort((p,q)=>p[0]-q[0]);
+  let covered=0, overlaps=0, gaps=0, curEnd=-1, unionEnd=0, prevUnion=0;
+  // union length + overlap detection
+  let merged=[];
+  for (const [a,b] of iv){
+    if (!merged.length || a > merged[merged.length-1][1] + 1e-6){
+      merged.push([a,b]);
+    } else {
+      overlaps += Math.max(0, Math.min(b, merged[merged.length-1][1]) - a) > 1e-6 ? 1 : 0;
+      merged[merged.length-1][1] = Math.max(merged[merged.length-1][1], b);
+    }
+  }
+  for (const [a,b] of merged) covered += (b-a);
+  // gaps = uncovered stretches inside [0,totalLen]
+  let pos = 0;
+  for (const [a,b] of merged){ if (a > pos + 1e-6) gaps++; pos = Math.max(pos, b); }
+  if (pos < totalLen - 1e-6) gaps++;
+  return { covered, gaps, overlaps };
+}
+
+// ---- World <-> screen ----
+function computeScale(){
+  discR = meta.disc_radius;
+  const pad = 18;
+  scale = (SIZE/2 - pad) / discR;
+  cxp = SIZE/2; cyp = SIZE/2;
+}
+function sx(x){ return cxp + x*scale; }
+function sy(y){ return cyp - y*scale; }
+function toWorld(mx,my){ return [ (mx-cxp)/scale, -(my-cyp)/scale ]; }
+
+// ---- Rendering ----
+function draw(){
+  ctx.clearRect(0,0,SIZE,SIZE);
+  if (!meta){ return; }
+
+  // disc + drawing-area rings
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#454b59';
+  ctx.beginPath(); ctx.arc(cxp, cyp, discR*scale, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([5,5]); ctx.strokeStyle = '#3a4150';
+  ctx.beginPath(); ctx.arc(cxp, cyp, meta.r_max_drawing*scale, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+  // center mark
+  ctx.strokeStyle = '#566'; ctx.beginPath();
+  ctx.moveTo(cxp-7,cyp); ctx.lineTo(cxp+7,cyp); ctx.moveTo(cxp,cyp-7); ctx.lineTo(cxp,cyp+7); ctx.stroke();
+
+  // full drawing in grey (uncovered base)
+  ctx.lineWidth = 1.4; ctx.strokeStyle = '#525866';
+  for (const e of arc){
+    ctx.beginPath();
+    ctx.moveTo(sx(e.pts[0][0]), sy(e.pts[0][1]));
+    for (let i=1;i<e.pts.length;i++) ctx.lineTo(sx(e.pts[i][0]), sy(e.pts[i][1]));
+    ctx.stroke();
+  }
+
+  // colored segments
+  sortSegs();
+  segments.forEach((seg, idx) => {
+    const col = segColor(idx);
+    const isSel = seg.id === selected;
+    ctx.lineWidth = isSel ? 5 : 3.2;
+    ctx.strokeStyle = col;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const pl of extractRange(seg.a, seg.b)){
+      ctx.beginPath();
+      ctx.moveTo(sx(pl[0][0]), sy(pl[0][1]));
+      for (let i=1;i<pl.length;i++) ctx.lineTo(sx(pl[i][0]), sy(pl[i][1]));
+      ctx.stroke();
+    }
+    // number at the segment midpoint
+    const mid = locateGlobal((seg.a+seg.b)/2);
+    ctx.fillStyle = '#0b0e14';
+    ctx.beginPath(); ctx.arc(sx(mid.x), sy(mid.y), 9, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = col; ctx.font = 'bold 12px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(String(idx+1), sx(mid.x), sy(mid.y));
+  });
+  ctx.lineCap = 'butt';
+
+  // boundary handles (in select mode)
+  if (mode === 'select'){
+    for (const seg of segments){
+      for (const v of [seg.a, seg.b]){
+        const p = locateGlobal(v);
+        ctx.fillStyle = '#0b0e14'; ctx.strokeStyle = '#cdd3df'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), 4.5, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+      }
+    }
+  }
+
+  // merge first pick highlight
+  if (mode === 'merge' && mergeFirst >= 0){
+    const seg = segById(mergeFirst);
+    if (seg){
+      const mid = locateGlobal((seg.a+seg.b)/2);
+      ctx.strokeStyle = '#ffcf6b'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sx(mid.x), sy(mid.y), 13, 0, Math.PI*2); ctx.stroke();
+    }
+  }
+
+  // add-mode pending preview
+  if (mode === 'add' && pendingFrom !== null && hover){
+    const a = Math.min(pendingFrom, hover.s), b = Math.max(pendingFrom, hover.s);
+    ctx.lineWidth = 4; ctx.strokeStyle = '#ffffff'; ctx.globalAlpha = 0.8; ctx.lineCap='round';
+    for (const pl of extractRange(a, b)){
+      ctx.beginPath(); ctx.moveTo(sx(pl[0][0]), sy(pl[0][1]));
+      for (let i=1;i<pl.length;i++) ctx.lineTo(sx(pl[i][0]), sy(pl[i][1]));
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.lineCap='butt';
+    const fp = locateGlobal(pendingFrom);
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(sx(fp.x), sy(fp.y), 5, 0, Math.PI*2); ctx.fill();
+  }
+
+  // hover marker
+  if (hover){
+    ctx.fillStyle = '#5b9dff';
+    ctx.beginPath(); ctx.arc(sx(hover.x), sy(hover.y), 4, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+// ---- UI refresh ----
+function refresh(){
+  draw();
+  // stats
+  const c = coverage();
+  document.getElementById('stTotal').textContent = totalLen ? totalLen.toFixed(1)+' mm' : '–';
+  document.getElementById('stCount').textContent = segments.length;
+  const covEl = document.getElementById('stCov');
+  const pct = totalLen ? (100*c.covered/totalLen) : 0;
+  covEl.textContent = totalLen ? `${pct.toFixed(1)}% (${c.covered.toFixed(1)} mm)` : '–';
+  covEl.className = pct > 99.5 ? 'ok' : '';
+  const gEl = document.getElementById('stGaps'); gEl.textContent = c.gaps;
+  gEl.className = c.gaps ? 'warn' : 'ok';
+  const oEl = document.getElementById('stOver'); oEl.textContent = c.overlaps;
+  oEl.className = c.overlaps ? 'warn' : 'ok';
+
+  // list
+  const list = document.getElementById('seglist');
+  list.innerHTML = '';
+  segments.forEach((seg, idx) => {
+    const row = document.createElement('div');
+    row.className = 'seg' + (seg.id===selected ? ' sel' : '');
+    const len = (seg.b - seg.a);
+    row.innerHTML =
+      `<span class="sw" style="background:${segColor(idx)}"></span>` +
+      `<span class="nm">#${idx+1}</span>` +
+      `<span class="ln">${len.toFixed(1)} mm</span>` +
+      `<span class="x" title="Delete">&times;</span>`;
+    row.addEventListener('click', (ev) => {
+      if (ev.target.classList.contains('x')){ deleteSeg(seg.id); return; }
+      selected = seg.id; refresh();
+    });
+    list.appendChild(row);
+  });
+
+  document.getElementById('dlBtn').disabled = !(meta && segments.length);
+}
+
+function deleteSeg(id){
+  segments = segments.filter(s=>s.id!==id);
+  if (selected===id) selected=-1;
+  refresh();
+}
+
+// ---- Mouse handling ----
+function evWorld(ev){
+  const r = cv.getBoundingClientRect();
+  return toWorld(ev.clientX - r.left, ev.clientY - r.top);
+}
+
+cv.addEventListener('mousemove', (ev) => {
+  if (!arc.length) return;
+  const [wx, wy] = evWorld(ev);
+  hover = nearestGlobalS(wx, wy);
+
+  if (drag){
+    let s = hover.s;
+    s = Math.max(drag.lo, Math.min(drag.hi, s));
+    for (const m of drag.members){ const seg = segById(m.id); if (seg) seg[m.end] = s; }
+    refresh();
+    return;
+  }
+  draw();
+});
+
+cv.addEventListener('mousedown', (ev) => {
+  if (!arc.length || ev.button !== 0) return;
+  const [wx, wy] = evWorld(ev);
+  hover = nearestGlobalS(wx, wy);
+  const s = hover.s;
+
+  if (mode === 'select'){
+    // try to grab a boundary handle (screen-space proximity)
+    let grabVal = null, gd = 11;
+    for (const seg of segments){
+      for (const v of [seg.a, seg.b]){
+        const p = locateGlobal(v);
+        const d = Math.hypot((ev.clientX - cv.getBoundingClientRect().left) - sx(p.x),
+                             (ev.clientY - cv.getBoundingClientRect().top) - sy(p.y));
+        if (d < gd){ gd = d; grabVal = v; }
+      }
+    }
+    if (grabVal !== null){
+      // gather all endpoints coincident with grabVal (shared cuts move together)
+      const members = [];
+      for (const seg of segments){
+        if (Math.abs(seg.a - grabVal) < 1e-6) members.push({id:seg.id, end:'a'});
+        if (Math.abs(seg.b - grabVal) < 1e-6) members.push({id:seg.id, end:'b'});
+      }
+      // clamp range so every member stays valid
+      let lo = 0, hi = totalLen;
+      for (const m of members){ const seg = segById(m.id);
+        if (m.end==='a') hi = Math.min(hi, seg.b - MIN_SEG());
+        else            lo = Math.max(lo, seg.a + MIN_SEG());
+      }
+      drag = { members, lo, hi };
+      return;
+    }
+    selected = segAt(s);
+    refresh();
+    return;
+  }
+
+  if (mode === 'split'){
+    const id = segAt(s);
+    const seg = segById(id);
+    if (seg && s > seg.a + MIN_SEG() && s < seg.b - MIN_SEG()){
+      const nb = makeSeg(s, seg.b); seg.b = s; segments.push(nb); selected = nb.id;
+      refresh();
+    }
+    return;
+  }
+
+  if (mode === 'add'){
+    if (pendingFrom === null){ pendingFrom = s; }
+    else {
+      const a = Math.min(pendingFrom, s), b = Math.max(pendingFrom, s);
+      if (b - a > MIN_SEG()){ const ns = makeSeg(a, b); segments.push(ns); selected = ns.id; }
+      pendingFrom = null; refresh();
+    }
+    draw();
+    return;
+  }
+
+  if (mode === 'merge'){
+    const id = segAt(s);
+    if (id < 0) return;
+    if (mergeFirst < 0){ mergeFirst = id; draw(); return; }
+    if (id === mergeFirst){ mergeFirst = -1; draw(); return; }
+    const A = segById(mergeFirst), B = segById(id);
+    A.a = Math.min(A.a, B.a); A.b = Math.max(A.b, B.b);
+    segments = segments.filter(s2 => s2.id !== B.id);
+    selected = A.id; mergeFirst = -1; refresh();
+    return;
+  }
+
+  if (mode === 'delete'){
+    const id = segAt(s);
+    if (id >= 0) deleteSeg(id);
+    return;
+  }
+});
+
+window.addEventListener('mouseup', () => { drag = null; });
+cv.addEventListener('mouseleave', () => { hover = null; draw(); });
+cv.addEventListener('contextmenu', (ev) => {
+  if (mode === 'add' && pendingFrom !== null){ ev.preventDefault(); pendingFrom = null; draw(); }
+});
+
+// ---- Controls ----
+document.querySelectorAll('.modes button').forEach(b => {
+  b.addEventListener('click', () => {
+    mode = b.dataset.mode;
+    document.querySelectorAll('.modes button').forEach(x => x.classList.toggle('on', x===b));
+    document.getElementById('modeHelp').textContent = modeHelps[mode];
+    pendingFrom = null; mergeFirst = -1;
+    refresh();
+  });
+});
+document.getElementById('modeHelp').textContent = modeHelps.select;
+
+document.getElementById('splitBtn').addEventListener('click', () => {
+  if (!totalLen) return;
+  const n = Math.max(1, Math.min(200, parseInt(document.getElementById('nSteps').value||'16',10)));
+  autoSplit(n);
+});
+
+document.getElementById('loadBtn').addEventListener('click', () => document.getElementById('file').click());
+document.getElementById('file').addEventListener('change', (ev) => {
+  const f = ev.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { try { loadData(JSON.parse(r.result)); } catch(e){ alert('Could not parse JSON: '+e.message); } };
+  r.readAsText(f);
+});
+
+function loadData(d){
+  if (!d.subpaths || !d.meta){ alert('This file is not a disc export (need meta + subpaths). Generate it with --export-json.'); return; }
+  meta = d.meta;
+  subpaths = d.subpaths.map(sp => sp.map(p => [ +p[0], +p[1] ]));
+  buildArcModel();
+  computeScale();
+  document.getElementById('drop').style.display = 'none';
+  document.getElementById('metaInfo').innerHTML =
+    `Disc &oslash; ${(meta.disc_radius*2).toFixed(0)} mm &middot; slot ${meta.slot_width} mm &middot; ` +
+    `d_min ${meta.dmin} mm &middot; ${arc.length} subpath(s) &middot; ${totalLen.toFixed(0)} mm total`;
+  const ns = document.getElementById('nSteps');
+  ns.value = meta.suggested_steps || 16;
+  autoSplit(parseInt(ns.value,10));
+}
+
+document.getElementById('dlBtn').addEventListener('click', () => {
+  if (!meta || !segments.length) return;
+  sortSegs();
+  const out = {
+    version: 1,
+    units: 'mm',
+    meta,
+    segments: segments.map(seg => ({
+      subpaths: extractRange(seg.a, seg.b).map(pl => pl.map(p => [ +p[0].toFixed(4), +p[1].toFixed(4) ]))
+    })).filter(s => s.subpaths.length)
+  };
+  const blob = new Blob([JSON.stringify(out)], { type:'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'segments.json'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+draw();
+</script>
+</body>
+</html>
