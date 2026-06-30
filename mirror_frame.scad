@@ -16,7 +16,7 @@
 
 /* [Display Settings] */
 // Mode: "assembled" for 3D preview, "flatpack" for 2D laser-cut nesting layout
-mode = "flatpack"; // ["assembled", "flatpack"]
+mode = "assembled"; // ["assembled", "flatpack"]
 
 // Toggle rendering of the plexiglass mirror itself in 3D preview
 show_mirror = true;
@@ -24,7 +24,7 @@ show_mirror = true;
 // Exploded view (assembled mode only): separation gap (mm) inserted between each
 // layer along the stack axis, in true assembly order. 0 = fully assembled;
 // try 15-25 to see how the layers stack for glue-up. Has no effect in flatpack.
-explode = 0; // [0:1:60]
+explode = 60; // [0:1:60]
 
 /* [Material & Fabrication Parameters] */
 // Wood sheet thickness (mm) - matching the beacons/lantern sheets

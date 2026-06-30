@@ -8,7 +8,7 @@
 //             swap at the layer where the numbers start to colour them)
 // "numbers" = ONLY the raised numbers, for a separate second-material STL
 // "frame"   = holder frame    "both" = assembly preview
-part = "both"; // ["disc", "numbers", "frame", "both"]
+part = "disc"; // ["disc", "numbers", "frame", "both"]
 disc_radius = 50.8;
 disc_thickness = 2.0;
 slot_width = 1.5;
