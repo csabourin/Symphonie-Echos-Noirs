@@ -5,7 +5,7 @@
 
 /* [Display Configuration] */
 // Mode: "assembled" for 3D preview, "exploded" for exploded assembly, "flatpack" for 2D laser-cut nesting layout
-mode = "assembled"; // ["assembled", "exploded", "flatpack"]
+mode = "flatpack"; // ["assembled", "exploded", "flatpack"]
 
 // Separation distance in the exploded view (mm)
 exploded_offset = 20; // [0:100]
@@ -37,10 +37,10 @@ prong_gap = 24.0; // [10.0:50.0]
 handle_length = 115.0; // [100.0:200.0]
 
 // Width of the handle (mm) - sized to fit AA battery diameter
-handle_width = 22.0; // [18.0:40.0]
+handle_width = 25.5; // [18.0:40.0]
 
 // Radius of the pommel (circular end of handle) (mm)
-pommel_radius = 16.0; // [12.0:30.0]
+pommel_radius = 14.0; // [12.0:30.0]
 
 // Radius of the outer curve transitioning from handle to prongs (mm)
 transition_radius = 25.0; // [15.0:50.0]
@@ -61,8 +61,14 @@ pommel_type = "decorative"; // ["decorative", "flat"]
 // Number of stacked horizontal spacers in the decorative pommel
 num_spacers = 3; // [1:5]
 
-// Spacing of the living hinge cuts (mm)
-hinge_spacing = 2.2; // [1.0:5.0]
+// Spacing of the outer living hinge cuts (mm)
+hinge_spacing = 1.4; // [1.0:5.0]
+
+// Width of uncut bridges in the outer living hinge (mm)
+hinge_bridge = 1.5; // [1.0:4.0]
+
+// Extra hinge relief extending into the straight sections at each end (mm)
+hinge_relief = 4.0; // [0.0:10.0]
 
 // --- GEOMETRIC INTERNALS & CALCULATIONS (Do not modify) ---
 $fn = 60;
@@ -387,9 +393,10 @@ module flat_outer_wall() {
             }
         }
         
-        // Staggered living hinge cuts for the S-curve transition
-        translate([L_prong, 0])
-        living_hinge_cuts(L_trans_up + L_trans_low, inside_height, hinge_spacing);
+        // Staggered living hinge cuts for the S-curve transition, with short
+        // relief sections so the bend is not concentrated at the curve ends.
+        translate([L_prong - hinge_relief, 0])
+        living_hinge_cuts(L_trans_up + L_trans_low + 2 * hinge_relief, inside_height, hinge_spacing, hinge_bridge);
     }
 }
 
